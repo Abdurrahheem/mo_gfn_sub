@@ -6,21 +6,21 @@ random_action_prob: 0.01
 max_len: ${task.max_len}
 min_len: ${task.min_len}
 eval_metrics: ["hypervolume", "r2", "hsri"]
-batch_size: 128
+batch_size: 1 
 reward_exp: 4
 reward_min: 1e-80
 reward_max: 100
 sampling_temp: 1
-train_steps: 100
+train_steps: 200
 beta_use_therm: True
 pref_use_therm: True
-beta_cond: True
-pref_cond: True
+beta_cond: false
+pref_cond: true
 beta_scale: 1
 beta_shape: 32
-pref_alpha: 1.0
-pi_lr: 0.0001
-z_lr: 0.001
+pref_alpha: [1.0, 1.0, 1.0]
+pi_lr: 0.00001
+z_lr: 0.0001
 wd: 0.0001
 beta_max: 32
 therm_n_bins: 50
@@ -33,7 +33,7 @@ eval_freq: 500
 k: 10
 num_samples: 128
 use_eval_pref: False
-state_save_path: "/home/mila/m/moksh.jain/mo_gfn/test.pkl.gz"
+state_save_path: "./states.pkl.gz"
 num_pareto_points: 500
 pareto_freq: 500
 unnormalize_rewards: False

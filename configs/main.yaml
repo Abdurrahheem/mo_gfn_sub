@@ -1,15 +1,23 @@
 defaults:
-  - task: regex
+  - task: mrna
   - algorithm: mogfn
-  - tokenizer: protein
+  - tokenizer: mrna_seq
+  - _self_
 
 seed: ${trial_id}
 trial_id: 0
-project_name: torch_seq_moo
+project_name: 'gfn_mo'
 version: v0.0.1
 
+# where to save data
+data_dir: ./data
+
+# project, experiment, and trial names for logging
+experiment_name: ${task.name}
+trial_name: 'trial_${now:%Y-%m-%d_%H-%M-%S}'
+run_name: '${experiment_name}_${trial_name}'
+
 # Directories for loading and storing data
-data_dir: /home/mila/m/moksh.jain/scratch/lambo
 exp_name: test
 group_name: somedetails
 exp_tags: []

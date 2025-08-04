@@ -1,0 +1,27 @@
+_target_: mo_gfn.torch_seq_moo.tasks.mrna.MRNADesignTask
+
+# --- Task-specific parameters for mRNA Design ---
+
+# The protein sequence to be translated into an mRNA sequence.
+protein_seq: "VLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHF"
+max_len: 46 
+min_len: 46
+
+# --- Objective Normalization Parameters ---
+
+# GC Content: Target a range around 57.5%
+gc_target: 57.5
+gc_width: 2.5  # Controls the width of the Gaussian reward function
+
+# Minimum Free Energy (MFE): Expected range for normalization.
+# These are rough estimates and might need tuning. Lower is better.
+mfe_min: -300.0 # Approximate lower bound of MFE for a sequence of this length
+mfe_max: 0.0     # Approximate upper bound (an unfolded sequence)
+
+# Codon Adaptation Index (CAI): Expected range for normalization.
+# Higher is better.
+cai_min: 0.1
+cai_max: 1.0
+
+# Device to run the task-related computations on.
+device: "cuda:5" 

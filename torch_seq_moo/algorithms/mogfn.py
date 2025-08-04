@@ -8,6 +8,8 @@ import random
 import matplotlib.pyplot as plt
 from torch.nn import functional as F
 
+from torch_seq_moo.data.mrna_constants import IDX_TO_CODON
+
 from torch_seq_moo.algorithms.base import BaseAlgorithm
 from torch_seq_moo.algorithms.mogfn_utils.utils import mean_pairwise_distances, generate_simplex, thermometer, plot_pareto, pareto_frontier
 from torch_seq_moo.utils import str_to_tokens, tokens_to_str
@@ -66,9 +68,11 @@ class MOGFN(BaseAlgorithm):
         self.pad_tok = self.tokenizer.convert_token_to_id("[PAD]")
         self.simplex = generate_simplex(self.obj_dim, cfg.simplex_bins)
         self.unnormalize_rewards = cfg.unnormalize_rewards
-        # Adapt model config to task
-        self.cfg.model.vocab_size = len(self.tokenizer.full_vocab)
-        self.cfg.model.num_actions = len(self.tokenizer.non_special_vocab) + 1
+        # Adapt model config to task if not already set, for backward compatibility
+        if not hasattr(self.cfg.model, "vocab_size"):
+            self.cfg.model.vocab_size = len(self.tokenizer.full_vocab)
+        if not hasattr(self.cfg.model, "num_actions"):
+            self.cfg.model.num_actions = len(self.tokenizer.non_special_vocab) + 1
 
     def get_eval_pref(self):
         rs = np.random.RandomState(123)
@@ -145,10 +149,10 @@ class MOGFN(BaseAlgorithm):
                         prefs=prefs
                     ))
                     self.save_state()
-            self.log(dict(
-                train_loss=loss,
-                train_rewards=r,
-            ))
+            # self.log(dict(
+            #     train_loss=loss,
+            #     train_rewards=r,
+            # ))
             pb.set_description(desc_str.format(rs.mean(), hv, r2, hsri, sum(losses[-10:]) / 10, sum(rewards[-10:]) / 10))
         
         return {
@@ -159,14 +163,25 @@ class MOGFN(BaseAlgorithm):
     
     def train_step(self, task, batch_size):
         cond_var, (prefs, beta) = self._get_condition_var(train=True, bs=batch_size)
+        # print("cond_var", cond_var, cond_var.shape)
+        # print("prefs", prefs)
+        # print("beta", beta)
         states, logprobs = self.sample(batch_size, cond_var)
+        # print("states", states)
+        # print("logprobs", logprobs)
+    
 
         log_r = self.process_reward(states, prefs, task).to(self.device)
+
+        # import sys
+        # sys.exit()
+
         self.opt.zero_grad()
         self.opt_Z.zero_grad()
         
         # TB Loss
         loss = (logprobs - beta * log_r).pow(2).mean()
+        # print("loss", loss, "log_r", log_r)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gen_clip)
         self.opt.step()
@@ -180,40 +195,128 @@ class MOGFN(BaseAlgorithm):
         if cond_var is None:
             cond_var, _ = self._get_condition_var(train=train, bs=episodes)
         active_mask = torch.ones(episodes).bool().to(self.device)
-        x = str_to_tokens(states, self.tokenizer).to(self.device).t()[:1]
+
+        # Check if the task is our constrained mRNA design task
+        is_constrained = hasattr(self.task, "protein_seq")
+        if is_constrained:
+            protein_len = len(self.task.protein_seq)
+            # For our task, we generate from scratch, so x starts empty and we build it.
+            # `str_to_tokens` should handle this, returning a minimal tensor.
+            # print("states", states)
+            x = str_to_tokens(states, self.tokenizer, use_sep=False).to(self.device).t()
+            # print("x", x)
+        else:
+            # Original behavior for other tasks
+            x = str_to_tokens(states, self.tokenizer).to(self.device).t()[:1]
+
         lens = torch.zeros(episodes).long().to(self.device)
         uniform_pol = torch.empty(episodes).fill_(self.random_action_prob).to(self.device)
 
-        for t in (range(self.max_len) if episodes > 0 else []):
+        # The loop length should be guided by the protein length for the constrained case
+        max_len = protein_len + 1 if is_constrained else self.max_len
+        # print("max_len", max_len)
+
+        for t in (range(max_len) if episodes > 0 else []):
             logits = self.model(x, cond_var, lens=lens, mask=None)
+            # print("logits", logits.shape)
             
-            if t <= self.min_len:
-                logits[:, 0] = -1000 # Prevent model from stopping
-                                     # without having output anything
-                if t == 0:
-                    traj_logprob += self.model.Z(cond_var)
+            # --- Start of Constrained Sampling Logic ---
+            if is_constrained:
+                if t < protein_len:
+
+                    # Get valid token IDs from the task for the current position
+                    valid_token_ids = self.task.get_valid_actions(t)
+
+                    # lets print the codon for the valid token ids
+                    
+                    # Map token IDs to the model's action IDs.
+                    # Action `i` (where i>0) corresponds to the (i-1)-th codon in the tokenizer's `non_special_vocab`.
+                    # So, Action ID = Token ID - (number of special tokens) + 1
+                    offset = len(self.tokenizer.special_tokens)
+                    # print("offset", offset)
+                    valid_actions = [tid - offset + 1 for tid in valid_token_ids if tid >= offset]
+                    # print("valid actions", valid_actions)
+
+                    
+                    # Create a mask to disable all actions by default
+                    action_mask = torch.full_like(logits, -1e9)
+                    # Enable valid codon actions
+                    action_mask[:, valid_actions] = 0
+                    # Explicitly disable the stop action during generation
+
+                    # Disable the stop action (action 0) during codon generation
+                    # This prevents the model from ending the sequence prematurely
+                    action_mask[:, 0] = -1e9
+                    
+                    # Apply the action mask to the logits to enforce constraints
+                    logits = logits + action_mask
+
+                elif t == protein_len:
+                    # Force the model to select the stop action
+                    action_mask = torch.full_like(logits, -1e9)
+                    action_mask[:, 0] = 0 # Enable ONLY the stop action
+                    logits = logits + action_mask
+            else:
+                 # Original unconstrained logic
+                 if t <= self.min_len:
+                    logits[:, 0] = -1000
+
+            if t == 0:
+                traj_logprob += self.model.Z(cond_var)
+            # --- End of Constrained Sampling Logic ---
 
             sampling_dist = Categorical(logits=logits / self.sampling_temp)
             policy_dist = Categorical(logits=logits)
             actions = sampling_dist.sample()
-            if train and self.random_action_prob > 0:
-                uniform_mix = torch.bernoulli(uniform_pol).bool()
-                actions = torch.where(uniform_mix, torch.randint(int(t <= self.min_len), logits.shape[1], (episodes, )).to(self.device), actions)
-            
+            # print("actions", actions)
             log_prob = policy_dist.log_prob(actions) * active_mask
             traj_logprob += log_prob
+            # print("traj_logprob", traj_logprob)
+            
+            # --- Start of Fixed Action-to-Token Mapping ---
+            # The original `actions + 4` is hardcoded and incorrect for our tokenizer.
+            # We must map actions back to token IDs correctly.
+            actions_apply = torch.full_like(actions, self.tokenizer.padding_idx)
+            # print("actions_apply", actions_apply)
 
-            actions_apply = torch.where(torch.logical_not(active_mask), torch.zeros(episodes).to(self.device).long(), actions + 4)
+            # Map stop action (0) to the EOS token ID
+            is_stop_action = (actions == 0)
+            # print("is_stop_action", is_stop_action)
+            actions_apply[is_stop_action] = self.tokenizer.eos_token_id
+            # print("actions_apply after stop action", actions_apply)
+
+            # Map codon actions (>0) to their corresponding token IDs
+            is_codon_action = (actions > 0)
+            if torch.any(is_codon_action):
+                codon_actions = actions[is_codon_action]
+                # print("codon_actions", codon_actions)
+                offset = len(self.tokenizer.special_tokens)
+                # Token ID = Action ID + (num special tokens) - 1
+                codon_token_ids = codon_actions + offset - 1
+                actions_apply[is_codon_action] = codon_token_ids
+                # print("actions_apply after codon actions", actions_apply)
+            # --- End of Fixed Action-to-Token Mapping ---
+
+            # For finished sequences (inactive), use padding token.
+            actions_apply = torch.where(torch.logical_not(active_mask), torch.tensor(self.tokenizer.padding_idx).to(self.device), actions_apply)
+            # print("actions_apply after padding", actions_apply)
             active_mask = torch.where(active_mask, actions != 0, active_mask)
 
             x = torch.cat((x, actions_apply.unsqueeze(0)), axis=0)
             if active_mask.sum() == 0:
                 break
-        states = tokens_to_str(x.t(), self.tokenizer)
+            # print("--------------------------------")
+
+        # Decode the full sequence of token IDs using our tokenizer
+        states = self.tokenizer.batch_decode(x.t().cpu().tolist())
+        # print("print states", states)
+        # print("print traj_logprob", traj_logprob)
         return states, traj_logprob
     
 
     def process_reward(self, seqs, prefs, task, rewards=None, train=True):
+        # import ipdb
+        # ipdb.set_trace()
         if rewards is None:
             rewards = task.score(seqs)
         if self.reward_type == "convex":
