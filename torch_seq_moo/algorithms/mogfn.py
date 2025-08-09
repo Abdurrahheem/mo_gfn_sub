@@ -155,6 +155,25 @@ class MOGFN(BaseAlgorithm):
             # ))
             pb.set_description(desc_str.format(rs.mean(), hv, r2, hsri, sum(losses[-10:]) / 10, sum(rewards[-10:]) / 10))
         
+        # Print a sample from the trained model
+        with torch.no_grad():
+            if hasattr(task, "protein_seq"):
+                try:
+                    pref = np.ones(self.obj_dim) / self.obj_dim
+                    cond_var, _ = self._get_condition_var(prefs=pref, train=False, bs=1)
+                    gen_samples, _ = self.sample(1, cond_var, train=False)
+                    gen_rewards = task.score(gen_samples)
+                    if self.unnormalize_rewards:
+                        gen_rewards = gen_rewards * task.score_max
+
+                    print("[MOGFN] Sample after training")
+                    print(f"  Protein: {task.protein_seq}")
+                    print(f"  Prefs: {pref}")
+                    print(f"  Seq:   {gen_samples[0]}")
+                    print(f"  Rews:  {gen_rewards[0]}")
+                except Exception as e:
+                    print(f"[MOGFN] Failed to sample after training: {e}")
+
         return {
             'losses': losses,
             'train_rs': rewards,
